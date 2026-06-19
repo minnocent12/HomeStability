@@ -33,10 +33,22 @@ router.post('/', async (req, res) => {
     }
   }
 
+  const roles = messages.map((m) => m.role).join(',')
+  console.log(
+    `[CHAT REQUEST] messageCount=${messages.length} roles=[${roles}] conversationId=${
+      req.body?.conversationId || 'null'
+    } hasExistingPlan=${hasExistingPlan}`,
+  )
+
   // Conversational + structured turn. Only `reply` is shown to the user.
-  const { reply, situation, planAction, planDraft } = await groqService.converse(messages, {
+  const { reply, situation, planAction, planDraft, source } = await groqService.converse(messages, {
     hasExistingPlan,
   })
+  console.log(
+    `[CHAT RESPONSE] source=${source} situation=${situation?.status} planAction=${planAction?.type} replyPreview=${JSON.stringify(
+      (reply || '').slice(0, 80),
+    )}`,
+  )
 
   // Urgency-aware recommendations (legal/211/shelter rank first for urgent eviction).
   const recommendedResources = await resourceService.getRecommendedResources(situation, 5)
@@ -68,7 +80,9 @@ router.post('/', async (req, res) => {
     }
   }
 
-  res.json({ reply, situation, recommendedResources, conversationId, planAction, planDraft })
+  // `source` ('groq' | 'fallback') is exposed so clients/tests can confirm the
+  // AI path was actually used rather than silently degrading to the fallback.
+  res.json({ reply, situation, recommendedResources, conversationId, planAction, planDraft, source })
 })
 
 export default router

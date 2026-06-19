@@ -49,6 +49,16 @@ export default function PlanPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Derive completed-task state from the plan's persisted task flags whenever the
+  // plan changes. This reflects DB completion AND keeps the set reconciled to the
+  // current task ids, so an AI update that adds/removes tasks can never leave a
+  // stale id behind (which would otherwise corrupt the completion %).
+  // NOTE: clicking the checkbox is session-only (not yet persisted) — see notes.
+  useEffect(() => {
+    const done = new Set((plan?.tasks || []).filter((t) => t.completed).map((t) => t.id))
+    setCompleted(done)
+  }, [plan])
+
   async function loadPlan() {
     setLoading(true)
     try {
@@ -93,13 +103,31 @@ export default function PlanPage() {
     }
   }
 
-  const toggleTask = (id) =>
+  const toggleTask = (id) => {
+    if (!plan) return
+    const willComplete = !completed.has(id)
+    // Optimistic: flip the checkbox instantly.
     setCompleted((prev) => {
       const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
+      if (willComplete) next.add(id)
+      else next.delete(id)
       return next
     })
+    setNotice('')
+    // Persist to the same plan_tasks.status the AI update path uses.
+    plansApi
+      .updateTaskStatus(plan.id, id, willComplete ? 'completed' : 'pending')
+      .catch(() => {
+        // Roll back the optimistic change if it didn't save.
+        setCompleted((prev) => {
+          const next = new Set(prev)
+          if (willComplete) next.delete(id)
+          else next.add(id)
+          return next
+        })
+        setNotice("Couldn't save that change — please try again.")
+      })
+  }
 
   const tasks = plan?.tasks || []
   const completion = useMemo(() => {

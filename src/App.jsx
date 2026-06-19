@@ -36,7 +36,7 @@ export default function App() {
             />
             <Route path="*" element={<Navigate to="/resources" replace />} />
           </Route>
-          </Routes>
+        </Routes>
         </SavedProvider>
       </ResourcesProvider>
     </AuthProvider>

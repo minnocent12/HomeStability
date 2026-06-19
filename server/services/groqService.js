@@ -1,12 +1,20 @@
 import Groq from 'groq-sdk'
 import { HOUSING_COUNSELOR_PROMPT } from '../prompts/housingCounselorPrompt.js'
 
+// Fallback chain (deduped). Order matters for the JSON-heavy calls: prefer
+// instruct models that emit JSON directly. `openai/gpt-oss-20b` is a
+// reasoning-style model that can burn its whole max_tokens budget on internal
+// reasoning and return EMPTY content for these calls, so it sits last.
 const MODELS = [
-  process.env.GROQ_MODEL,
-  'openai/gpt-oss-20b',
-  'llama-3.1-8b-instant',
-  'llama-3.3-70b-versatile',
-].filter(Boolean)
+  ...new Set(
+    [
+      process.env.GROQ_MODEL,
+      'llama-3.3-70b-versatile',
+      'llama-3.1-8b-instant',
+      'openai/gpt-oss-20b',
+    ].filter(Boolean),
+  ),
+]
 const apiKey = process.env.GROQ_API_KEY
 
 // Single client instance, created only when a key is present.
@@ -36,8 +44,29 @@ async function complete({ messages, maxTokens = 600, temperature = 0.5, json = f
         // We parse JSON manually later with parseJson().
       })
 
-      console.log(`Groq model used: ${model}${json ? ' (manual JSON parsing)' : ''}`)
-      return completion.choices[0]?.message?.content ?? ''
+      const finishReason = completion.choices[0]?.finish_reason
+      const content = completion.choices[0]?.message?.content ?? ''
+
+      // For JSON calls, a response that is empty OR was truncated mid-output
+      // (finish_reason=length — e.g. a reasoning model that spent its whole
+      // budget before finishing the JSON) is unparseable and useless. Treat it
+      // as a failure and try the next model rather than returning it and only
+      // discovering the problem later in parseJson. (Truncated prose is fine
+      // for non-JSON calls, so this only applies when json=true.)
+      if (json && (content.trim() === '' || finishReason === 'length')) {
+        lastError = new Error(
+          `unusable JSON output (finish_reason=${finishReason}, len=${content.length})`,
+        )
+        console.warn(
+          `Groq model unusable: ${model} finish_reason=${finishReason} contentLen=${content.length} — trying next`,
+        )
+        continue
+      }
+
+      console.log(
+        `Groq model used: ${model}${json ? ' (manual JSON parsing)' : ''} finish_reason=${finishReason}`,
+      )
+      return content
     } catch (error) {
       lastError = error
 
@@ -91,9 +120,10 @@ function parseJson(text, fallback) {
  */
 export function detectSituation(text = '') {
   const t = text.toLowerCase()
-  const situation = { status: 'general', concern: null, income: null, urgency: 'normal' }
+  // "none" matches the prompt's situation.status enum (no actionable situation).
+  const situation = { status: 'none', concern: null, income: null, urgency: 'normal' }
 
-  if (/(homeless|nowhere to (go|stay)|on the street|sleeping in|shelter tonight)/.test(t)) {
+  if (/(homeless|nowhere to (go|stay)|on the street|sleeping in|need (a )?shelter|looking for (a )?shelter|shelter tonight|emergency shelter|need somewhere to stay|place to stay|safe place to stay|need emergency housing|kicked out)/.test(t)) {
     situation.status = 'homelessness'
     situation.urgency = 'immediate'
   } else if (/(evict|behind on rent|late (on )?rent|past due rent|landlord|lease|notice to vacate)/.test(t)) {
@@ -118,6 +148,15 @@ export function detectSituation(text = '') {
 
   return situation
 }
+
+// Dedicated system prompt for PLAN generation. Deliberately NOT the slim
+// conversational prompt — that one forbids tasks/goal/plan fields, which would
+// produce an empty plan here. This one's whole job is to emit the plan JSON.
+const PLAN_GEN_SYSTEM = `You are a housing-stability planner for Atlanta residents. Using the conversation and the detected situation, produce a concrete, practical, step-by-step action plan as JSON.
+- Prioritize the most time-sensitive steps first (for an imminent eviction: legal aid and an emergency shelter backup before longer-term steps).
+- Be specific to what the person actually said in the conversation.
+- Do NOT give case-specific legal advice — for legal specifics, point to Atlanta Legal Aid.
+- Return ONLY valid JSON, no prose, no markdown.`
 
 export const groqService = {
   isGroqEnabled,
@@ -144,42 +183,77 @@ export const groqService = {
    * `reply` string only — no JSON ever reaches the UI.
    */
   async converse(messages, { hasExistingPlan = false } = {}) {
-    if (!groq) return fallbackConverse(messages, hasExistingPlan)
+    if (!groq) {
+      console.warn('[CONVERSE] no Groq client — using fallback')
+      return { ...fallbackConverse(messages, hasExistingPlan), source: 'fallback' }
+    }
 
+    // Single source of truth — HOUSING_COUNSELOR_PROMPT already defines the
+    // tone rules AND the full JSON schema. Only the existing-plan context is
+    // appended; no second prompt is concatenated.
     const system =
-      CONVERSE_PROMPT +
+      HOUSING_COUNSELOR_PROMPT +
       `\n\nContext: the user ${
         hasExistingPlan
           ? 'ALREADY HAS a saved plan — prefer planAction.type "update_draft" when their situation has changed.'
           : 'has NO saved plan yet — use planAction.type "create_draft" when a plan would help.'
       }`
 
-    const text = await complete({
-      json: true,
-      maxTokens: 700,
-      temperature: 0.5,
-      messages: [{ role: 'system', content: system }, ...messages],
-    })
+    let text = ''
+    try {
+      text = await complete({
+        json: true,
+        // Lightweight per-turn schema (reply + situation + planAction only) —
+        // ~450 tokens is plenty and lets smaller fallback models complete the
+        // JSON reliably across multi-turn chats.
+        maxTokens: 450,
+        // Low temperature: the conversational turn must follow the continuity /
+        // non-repetition / question-engagement rules reliably. We trade some
+        // stylistic variety for consistent instruction-following.
+        temperature: 0.25,
+        messages: [{ role: 'system', content: system }, ...messages],
+      })
+    } catch (err) {
+      console.warn('[CONVERSE FAILED] Groq call threw — using fallback:', err.message)
+      return { ...fallbackConverse(messages, hasExistingPlan), source: 'fallback' }
+    }
+
+    console.log('[CONVERSE] RAW RESPONSE:', JSON.stringify(text).slice(0, 400))
     const parsed = parseJson(text, null)
     if (!parsed || typeof parsed.reply !== 'string') {
-      return fallbackConverse(messages, hasExistingPlan)
+      console.warn(`[CONVERSE FAILED] parse failed/no reply (rawLen=${text.length}) — using fallback`)
+      return { ...fallbackConverse(messages, hasExistingPlan), source: 'fallback' }
     }
-    return normalizeConverse(parsed, messages, hasExistingPlan)
+    console.log('[CONVERSE] PARSED RESULT reply:', JSON.stringify(parsed.reply).slice(0, 160))
+    return { ...normalizeConverse(parsed, messages, hasExistingPlan), source: 'groq' }
   },
 
-  /** Generate a structured, parseable housing plan from a situation. */
-  async generatePlan(situation) {
+  /**
+   * Generate a structured, parseable housing plan. `messages` (optional) is the
+   * conversation history — when provided, the plan is grounded in what the
+   * person actually said, not just the slim {status,urgency} situation object.
+   */
+  async generatePlan(situation, messages = []) {
     if (!groq) return fallbackPlan(situation)
+
+    const convo = (messages || []).filter(
+      (m) => m && (m.role === 'user' || m.role === 'assistant') && m.content,
+    )
 
     const text = await complete({
       json: true,
       maxTokens: 700,
       temperature: 0.4,
       messages: [
-        { role: 'system', content: HOUSING_COUNSELOR_PROMPT },
+        { role: 'system', content: PLAN_GEN_SYSTEM },
+        ...convo,
         {
           role: 'user',
-          content: `Create a structured housing plan. Return ONLY valid JSON with this shape:
+          content: `${
+            convo.length
+              ? 'Based on our conversation above, create'
+              : 'Create'
+          } a structured housing plan for this person. Return ONLY valid JSON with this shape:
 {
   "goal": "string",
   "riskLevel": "High|Medium|Low",
@@ -192,39 +266,85 @@ export const groqService = {
   "whyResources": { "1": "string" }
 }
 
-Situation: ${JSON.stringify(situation)}`,
+Detected situation: ${JSON.stringify(situation)}`,
         },
       ],
     })
     return parseJson(text, fallbackPlan(situation))
   },
 
-  /** Decide whether an existing plan should change given new info. */
+  /**
+   * Interpret a free-form plan-update request (add/remove/modify a task, or a
+   * life-event change) and return the changes to apply. References tasks by
+   * their REAL ids (passed in below) so removals/updates target the right row.
+   */
   async updatePlan(userMessage, existingPlan) {
     if (!groq) return fallbackUpdate(userMessage, existingPlan)
 
-    const text = await complete({
-      json: true,
-      maxTokens: 600,
-      temperature: 0.3,
-      messages: [
-        { role: 'system', content: HOUSING_COUNSELOR_PROMPT },
-        {
-          role: 'user',
-          content: `The user has provided an update. Their existing plan is:
+    const taskList =
+      (existingPlan.tasks || [])
+        .map(
+          (t) =>
+            `- id:${t.id} | title:"${t.title}" | priority:${t.priority || 'Medium'} | status:${
+              t.completed ? 'completed' : 'pending'
+            }`,
+        )
+        .join('\n') || '(no tasks yet)'
 
-${JSON.stringify(existingPlan)}
+    const planFields = {
+      goal: existingPlan.goal,
+      riskLevel: existingPlan.riskLevel,
+      urgency: existingPlan.urgency,
+      nextBestAction: existingPlan.nextBestAction,
+      estimatedTimeline: existingPlan.estimatedTimeline,
+    }
 
-New information: "${userMessage}"
+    let text = ''
+    try {
+      text = await complete({
+        json: true,
+        maxTokens: 700,
+        temperature: 0.3,
+        messages: [
+          { role: 'system', content: HOUSING_COUNSELOR_PROMPT },
+          {
+            role: 'user',
+            content: `The user wants to update their existing plan. Apply ONLY what they ask for.
 
-If their situation has changed, update the plan. Return JSON:
-{ "planAction": "update", "changes": [ { "field": "goal|riskLevel|urgency|summary|nextBestAction|estimatedTimeline", "oldValue": "...", "newValue": "..." }, { "field": "tasksRemove", "value": [1,2] }, { "field": "tasksAdd", "value": [{ "title": "...", "priority": "High", "description": "...", "dueDate": "..." }] } ], "explanation": "..." }
+Current plan fields: ${JSON.stringify(planFields)}
 
-If no changes are needed, return:
-{ "planAction": "noChange", "explanation": "Your plan still applies." }`,
-        },
-      ],
-    })
+Current tasks (use these EXACT ids when removing or updating a task — never use position):
+${taskList}
+
+User request: "${userMessage}"
+
+Return ONLY valid JSON:
+{
+  "planAction": "update" | "noChange",
+  "changes": [
+    { "field": "tasksAdd", "value": [{ "title": "...", "priority": "High|Medium|Low", "description": "...", "dueDate": "..." }] },
+    { "field": "tasksRemove", "value": ["<existing task id>"] },
+    { "field": "taskUpdate", "value": [{ "id": "<existing task id>", "title": "...", "priority": "High|Medium|Low", "status": "completed|pending", "description": "...", "dueDate": "..." }] },
+    { "field": "goal|riskLevel|urgency|summary|nextBestAction|estimatedTimeline", "oldValue": "...", "newValue": "..." }
+  ],
+  "explanation": "one or two plain-language sentences describing what changed"
+}
+
+Rules:
+- Include ONLY the changes the user actually asked for. Never invent unrelated edits.
+- For tasksRemove and taskUpdate, reference a task by its EXACT id from the list above.
+- If the user asks to remove/modify "the task" but it is unclear WHICH task (several exist, no clear referent), do NOT guess. Return "planAction":"noChange" with an explanation asking which task they mean, and an empty "changes" array.
+- If the request is unrelated to the plan or no change is warranted, return "planAction":"noChange", empty "changes", and an honest explanation.
+- For a life-event change (found a job, found housing, situation worsened), adjust riskLevel/urgency/nextBestAction and add/remove tasks as appropriate.`,
+          },
+        ],
+      })
+    } catch (err) {
+      console.warn('[updatePlan] Groq call failed — using fallback:', err.message)
+      return fallbackUpdate(userMessage, existingPlan)
+    }
+
+    console.log('[updatePlan] RAW:', JSON.stringify(text).slice(0, 300))
     return parseJson(text, fallbackUpdate(userMessage, existingPlan))
   },
 
@@ -252,32 +372,6 @@ If no changes are needed, return:
 /* Conversational + structured turn                                    */
 /* ------------------------------------------------------------------ */
 
-const CONVERSE_PROMPT = `${HOUSING_COUNSELOR_PROMPT}
-
-You are having a calm, natural conversation with an Atlanta resident. Return ONLY valid JSON with this exact shape:
-{
-  "reply": "a short, warm, conversational message (3-5 short sentences MAX)",
-  "situation": { "status": "eviction_risk|homelessness|financial_hardship|utility_risk|general", "urgency": "immediate|high|normal", "income": "low|moderate|unknown", "housingGoal": "keep_current_housing|find_housing|unknown" },
-  "planAction": { "type": "create_draft|update_draft|none", "reason": "short reason" },
-  "planDraft": {
-    "goal": "string", "riskLevel": "High|Medium|Low", "urgency": "Immediate|High|Normal",
-    "summary": "string", "estimatedTimeline": "string", "nextBestAction": "string",
-    "tasks": [{ "title": "string", "priority": "High|Medium|Low", "description": "string", "dueDate": "string" }],
-    "recommendedResources": [3, 12, 5]
-  }
-}
-
-Hard rules for "reply":
-- 3-5 short sentences, conversational and calm. Never robotic.
-- NEVER include JSON, code blocks, markdown, or long bullet lists in "reply".
-- No legal advice; suggest contacting Atlanta Legal Aid instead.
-- For an eviction happening tomorrow/today, prioritize (in this order): legal aid, emergency shelter backup, rental assistance, calling 211.
-
-Rules for structure:
-- "planAction.type" is "none" until the user has shared a real housing need. When "none", set "planDraft" to null.
-- Use "create_draft" when a plan would help and the user has no saved plan; "update_draft" when they already have one and their situation changed.
-- "planDraft" is for the backend only — never describe it as JSON in "reply".`
-
 function lastUserText(messages) {
   return [...messages].reverse().find((m) => m.role === 'user')?.content || ''
 }
@@ -290,7 +384,7 @@ function enrichSituation(s) {
     housingGoal:
       s.status === 'homelessness'
         ? 'find_housing'
-        : s.status === 'general'
+        : s.status === 'none'
           ? 'unknown'
           : 'keep_current_housing',
   }
@@ -306,14 +400,15 @@ function normalizeConverse(parsed, messages, hasExistingPlan) {
   if (planAction.type === 'create_draft' && hasExistingPlan) planAction.type = 'update_draft'
   if (planAction.type === 'update_draft' && !hasExistingPlan) planAction.type = 'create_draft'
 
-  const planDraft =
-    planAction.type === 'none' ? null : parsed.planDraft || fallbackPlan(detectSituation(lastUserText(messages)))
-  return { reply: parsed.reply, situation, planAction, planDraft }
+  // planDraft is NEVER produced per-turn anymore — it's generated on demand when
+  // the user explicitly clicks "Create My Plan". Button visibility is driven by
+  // planAction.type alone.
+  return { reply: parsed.reply, situation, planAction, planDraft: null }
 }
 
 function fallbackConverse(messages, hasExistingPlan) {
   const s = detectSituation(lastUserText(messages))
-  const hasNeed = s.status !== 'general'
+  const hasNeed = s.status !== 'none'
   const planAction = hasNeed
     ? {
         type: hasExistingPlan ? 'update_draft' : 'create_draft',
@@ -326,7 +421,9 @@ function fallbackConverse(messages, hasExistingPlan) {
     reply: shortReply(s),
     situation: enrichSituation(s),
     planAction,
-    planDraft: hasNeed ? fallbackPlan(s) : null,
+    // Match the AI path: no per-turn draft. The "Create My Plan" button (driven
+    // by planAction.type) generates the draft on demand.
+    planDraft: null,
   }
 }
 
@@ -449,6 +546,18 @@ function fallbackPlan(situation) {
 
 function fallbackUpdate(userMessage, existingPlan) {
   const s = detectSituation(userMessage)
+
+  // Direct "add a task to X" requests (heuristic, no-AI path).
+  const addMatch = userMessage.match(/add (?:a |another )?task (?:to |for |about )?(.+)/i)
+  if (addMatch) {
+    const title = addMatch[1].trim().replace(/[.!]+$/, '')
+    return {
+      planAction: 'update',
+      changes: [{ field: 'tasksAdd', value: [{ title, priority: 'Medium', description: '', dueDate: '' }] }],
+      explanation: `Added "${title}" to your tasks.`,
+    }
+  }
+
   if (/(found (a )?(job|place|housing|apartment)|new job|got hired|moved in|stable|no longer|resolved|caught up)/i.test(userMessage)) {
     return {
       planAction: 'update',

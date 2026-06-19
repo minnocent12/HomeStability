@@ -35,6 +35,20 @@ router.post('/generate', async (req, res) => {
   }
 })
 
+// Generate a plan draft for preview WITHOUT saving it. The frontend calls this
+// when the user clicks "Create My Plan", shows the preview, then confirms via
+// /confirm-draft to persist.
+// body: { situation }
+router.post('/draft', async (req, res) => {
+  try {
+    const draft = await planService.draftPlan(req.body?.situation || {}, req.body?.messages || [])
+    res.json(draft)
+  } catch (err) {
+    console.error('[plans:draft]', err.message)
+    res.status(500).json({ error: 'Could not generate plan draft' })
+  }
+})
+
 // Save a user-confirmed plan draft. Creates a new plan, or updates an existing
 // one when planId is supplied. The plan is only persisted on this explicit
 // confirmation — chat never auto-saves.
@@ -90,6 +104,30 @@ router.post('/:id/update', async (req, res) => {
   } catch (err) {
     console.error('[plans:update]', err.message)
     res.status(404).json({ error: 'Plan not found' })
+  }
+})
+
+// Set a single task's completion status (the manual checkbox writes here).
+// plan_tasks.status is the single source of truth, shared with the AI taskUpdate
+// path. body: { status: "completed" | "pending" | "in_progress" }
+const TASK_STATUSES = ['completed', 'pending', 'in_progress']
+router.patch('/:planId/tasks/:taskId', async (req, res) => {
+  const { planId, taskId } = req.params
+  if (!isValidUUID(planId) || !isValidUUID(taskId)) {
+    return res.status(404).json({ error: 'Not found' })
+  }
+  const { status } = req.body || {}
+  if (!TASK_STATUSES.includes(status)) {
+    return res.status(400).json({ error: 'Invalid status' })
+  }
+  try {
+    // Returns null if the task doesn't exist OR doesn't belong to this plan.
+    const plan = await planService.updateTaskStatus(planId, taskId, status)
+    if (!plan) return res.status(404).json({ error: 'Task not found' })
+    res.json(plan)
+  } catch (err) {
+    console.error('[plans:taskStatus]', err.message)
+    res.status(500).json({ error: 'Could not update task' })
   }
 })
 

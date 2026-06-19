@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   ArrowRight,
   CheckCircle2,
@@ -30,6 +30,7 @@ const PRIORITY_STYLES = {
 
 export default function ChatPage() {
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [messages, setMessages] = useState([GREETING])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -39,21 +40,46 @@ export default function ChatPage() {
   const [planDraft, setPlanDraft] = useState(null)
   const [conversationId, setConversationId] = useState(null)
   const [previewOpen, setPreviewOpen] = useState(false)
+  const [preparing, setPreparing] = useState(false)
   const [saving, setSaving] = useState(false)
   const scrollRef = useRef(null)
 
-  // Load the latest conversation from the DB on mount. Only brand-new chats
-  // (no saved messages) show the static greeting.
+  // Reset to a fresh chat (no DB record is created until the first message).
+  const startFresh = () => {
+    setMessages([GREETING])
+    setConversationId(null)
+    setInput('')
+    setRecommended([])
+    setSituation(null)
+    setPlanAction(null)
+    setPlanDraft(null)
+    setPreviewOpen(false)
+  }
+
+  // Load a conversation from the DB:
+  //  - ?conv=<id> → that specific conversation (clicked in the sidebar)
+  //  - otherwise   → the most recent conversation
+  //  - ?new=true   → skip (the effect below starts a fresh chat)
+  // Re-runs when the ?conv param changes so clicking a different sidebar item
+  // while already on /chat loads it.
+  const convParam = searchParams.get('conv')
   useEffect(() => {
+    if (searchParams.get('new') === 'true') return // handled by the effect below
     let active = true
     ;(async () => {
       try {
-        const list = await conversationsApi.list().catch(() => [])
-        if (!active || !Array.isArray(list) || list.length === 0) return
-        const conv = await conversationsApi.get(list[0].id).catch(() => null)
-        if (!active || !conv?.messages?.length) return
-        setConversationId(conv.id)
-        setMessages(conv.messages.map((m) => ({ role: m.role, content: m.content })))
+        let target = null
+        if (convParam) {
+          target = await conversationsApi.get(convParam).catch(() => null)
+        } else {
+          const list = await conversationsApi.list().catch(() => [])
+          if (Array.isArray(list) && list.length > 0) {
+            target = await conversationsApi.get(list[0].id).catch(() => null)
+          }
+        }
+        if (!active || !target?.messages?.length) return
+        setConversationId(target.id)
+        setMessages(target.messages.map((m) => ({ role: m.role, content: m.content })))
       } catch {
         /* keep greeting */
       }
@@ -61,7 +87,19 @@ export default function ChatPage() {
     return () => {
       active = false
     }
-  }, [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [convParam])
+
+  // Handle "New Conversation": when ?new=true appears (even while already on
+  // /chat), reset to a fresh chat and strip the param so a later reload doesn't
+  // re-trigger it. Clearing the param re-runs this effect, which then no-ops.
+  useEffect(() => {
+    if (searchParams.get('new') === 'true') {
+      startFresh()
+      setSearchParams({}, { replace: true })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams])
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
@@ -85,7 +123,12 @@ export default function ChatPage() {
       setSituation(res.situation || null)
       setPlanAction(res.planAction || null)
       setPlanDraft(res.planDraft || null)
-      if (res.conversationId) setConversationId(res.conversationId)
+      if (res.conversationId && res.conversationId !== conversationId) {
+        setConversationId(res.conversationId)
+        // A new conversation was just created — tell the sidebar to refresh so
+        // it shows up immediately, without requiring navigation.
+        window.dispatchEvent(new Event('hsg:conversations-changed'))
+      }
     } catch {
       setMessages((m) => [
         ...m,
@@ -99,11 +142,27 @@ export default function ChatPage() {
     }
   }
 
-  // Whether the assistant has proposed a plan worth offering.
+  // Button visibility is driven by planAction.type alone — the draft is NOT
+  // produced per-turn; it's generated fresh when the user opens the preview.
   const draftAction =
-    planDraft && (planAction?.type === 'create_draft' || planAction?.type === 'update_draft')
+    planAction?.type === 'create_draft' || planAction?.type === 'update_draft'
       ? planAction.type
       : null
+
+  // "Create/Update My Plan" click — generate the draft fresh, then preview it.
+  const openPreview = async () => {
+    setPreparing(true)
+    try {
+      // Pass the conversation (minus the static greeting) so the draft reflects
+      // the actual chat, not just the slim {status,urgency} situation object.
+      const dialogue = messages.filter((m, i) => !(i === 0 && m === GREETING))
+      const draft = await plansApi.generateDraft(situation || {}, dialogue)
+      setPlanDraft(draft)
+      setPreviewOpen(true)
+    } finally {
+      setPreparing(false)
+    }
+  }
 
   const confirmPlan = async () => {
     if (!planDraft) return
@@ -134,10 +193,15 @@ export default function ChatPage() {
         </div>
         {draftAction && (
           <button
-            onClick={() => setPreviewOpen(true)}
-            className="inline-flex shrink-0 items-center gap-2 rounded-lg bg-sage px-3.5 py-2 text-sm font-semibold text-white transition-colors hover:bg-sage-dark"
+            onClick={openPreview}
+            disabled={preparing}
+            className="inline-flex shrink-0 items-center gap-2 rounded-lg bg-sage px-3.5 py-2 text-sm font-semibold text-white transition-colors hover:bg-sage-dark disabled:opacity-60"
           >
-            {draftAction === 'update_draft' ? (
+            {preparing ? (
+              <>
+                <Loader2 size={16} className="animate-spin" /> Preparing…
+              </>
+            ) : draftAction === 'update_draft' ? (
               <>
                 <RefreshCw size={16} /> Update My Plan
               </>

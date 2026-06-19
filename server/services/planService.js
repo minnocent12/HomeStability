@@ -31,6 +31,12 @@ export const planService = {
     return isDbReady() ? persistNewPlan(situation, plan, userId) : memCreate(situation, plan, userId)
   },
 
+  // Generate a plan DRAFT without persisting it (used by the "Create My Plan"
+  // flow so the user can preview before confirming). Saving happens later via
+  // createFromDraft / updateFromDraft on confirmation.
+  draftPlan: async (situation, messages = []) =>
+    groqService.generatePlan(situation || {}, messages || []),
+
   // Persist a user-confirmed plan draft (no AI generation — the draft is final).
   createFromDraft: async (draft, situation = {}, userId = null) => {
     return isDbReady() ? persistNewPlan(situation, draft, userId) : memCreate(situation, draft, userId)
@@ -76,14 +82,52 @@ export const planService = {
     if (!existing) return { error: 'Plan not found' }
 
     const update = await groqService.updatePlan(userMessage, existing)
+    console.log(
+      `[plans:update] AI proposed planAction=${update.planAction} changes=${JSON.stringify(
+        update.changes || [],
+      ).slice(0, 300)}`,
+    )
 
-    if (update.planAction === 'update' && Array.isArray(update.changes)) {
-      const updated = isDbReady()
+    if (update.planAction === 'update' && Array.isArray(update.changes) && update.changes.length > 0) {
+      const { plan, skipped } = isDbReady()
         ? await dbApplyChanges(existing, update.changes)
         : memApplyAndStore(existing, update.changes)
-      return { planAction: 'update', plan: updated, explanation: update.explanation }
+
+      let explanation = update.explanation || 'Your plan has been updated.'
+      if (skipped?.length) {
+        explanation += ` (Couldn't apply everything: ${skipped.join('; ')}.)`
+      }
+      return { planAction: 'update', plan, explanation }
     }
-    return { planAction: 'noChange', plan: existing, explanation: update.explanation }
+    return {
+      planAction: 'noChange',
+      plan: existing,
+      explanation: update.explanation || 'No changes were needed.',
+    }
+  },
+
+  // Set one task's status. plan_tasks.status is the single source of truth
+  // (same field the AI taskUpdate path writes). The plan_id guard ensures the
+  // task actually belongs to the given plan. Returns the full updated plan, or
+  // null if the task isn't found / doesn't belong to the plan.
+  updateTaskStatus: async (planId, taskId, status) => {
+    if (!isDbReady()) {
+      const plan = memPlans.get(planId)
+      if (!plan) return null
+      const t = (plan.tasks || []).find((x) => String(x.id) === String(taskId))
+      if (!t) return null
+      t.completed = status === 'completed'
+      plan.updatedAt = new Date().toISOString()
+      return plan
+    }
+    const upd = await query(
+      'UPDATE plan_tasks SET status = $1 WHERE id = $2 AND plan_id = $3 RETURNING id',
+      [status, taskId, planId],
+    )
+    if (upd.rows.length === 0) return null
+    await query('UPDATE plans SET updated_at = NOW() WHERE id = $1', [planId])
+    console.log(`[plans:taskStatus] plan=${planId} task=${taskId} -> ${status}`)
+    return dbGetPlan(planId)
   },
 
   applyChanges,
@@ -215,23 +259,77 @@ function reshape(p, tasks, recs) {
   }
 }
 
+// Resolve a task reference (id or title) against the existing task list to a
+// single task. Returns { task } on success, or { error } when not found or
+// ambiguous — so callers can skip rather than touch the wrong row.
+function resolveTaskRef(tasks, ref) {
+  const refStr = String(ref ?? '').trim()
+  if (!refStr) return { error: 'empty task reference' }
+  const byId = tasks.find((t) => String(t.id) === refStr)
+  if (byId) return { task: byId }
+  const norm = (s) => String(s || '').toLowerCase().trim()
+  const r = norm(refStr)
+  const matches = tasks.filter((t) => {
+    const tt = norm(t.title)
+    return tt === r || tt.includes(r) || r.includes(tt)
+  })
+  if (matches.length === 1) return { task: matches[0] }
+  if (matches.length > 1) return { error: `"${refStr}" matches ${matches.length} tasks — too ambiguous to act on` }
+  return { error: `no task matching "${refStr}"` }
+}
+
 async function dbApplyChanges(existing, changes) {
+  const tasks = existing.tasks || []
+  const applied = []
+  const skipped = []
+
   for (const change of changes) {
     if (change.field === 'tasksRemove') {
-      const ids = (change.value || []).map(String)
-      if (ids.length) {
-        await query('DELETE FROM plan_tasks WHERE plan_id = $1 AND id::text = ANY($2)', [
-          existing.id,
-          ids,
-        ])
+      for (const ref of change.value || []) {
+        const { task, error } = resolveTaskRef(tasks, ref)
+        if (error) {
+          skipped.push(`remove skipped: ${error}`)
+          continue
+        }
+        await query('DELETE FROM plan_tasks WHERE id = $1 AND plan_id = $2', [task.id, existing.id])
+        applied.push(`removed task "${task.title}"`)
       }
     } else if (change.field === 'tasksAdd') {
       for (const t of change.value || []) {
+        if (!t?.title) {
+          skipped.push('add skipped: task has no title')
+          continue
+        }
         await query(
           `INSERT INTO plan_tasks (plan_id, title, description, priority, status, due_date)
            VALUES ($1, $2, $3, $4, 'pending', $5)`,
           [existing.id, t.title, t.description || null, t.priority || 'Medium', t.dueDate || null],
         )
+        applied.push(`added task "${t.title}"`)
+      }
+    } else if (change.field === 'taskUpdate') {
+      for (const upd of change.value || []) {
+        const { task, error } = resolveTaskRef(tasks, upd.id ?? upd.title)
+        if (error) {
+          skipped.push(`update skipped: ${error}`)
+          continue
+        }
+        const sets = []
+        const vals = []
+        let i = 1
+        // Only rename when a genuinely different title is given.
+        if (upd.title && upd.title !== task.title) { sets.push(`title = $${i++}`); vals.push(upd.title) }
+        if (upd.description != null) { sets.push(`description = $${i++}`); vals.push(upd.description) }
+        if (upd.priority) { sets.push(`priority = $${i++}`); vals.push(upd.priority) }
+        if (upd.dueDate != null) { sets.push(`due_date = $${i++}`); vals.push(upd.dueDate) }
+        if (upd.status) { sets.push(`status = $${i++}`); vals.push(upd.status) }
+        if (sets.length === 0) {
+          skipped.push(`update skipped: nothing to change on "${task.title}"`)
+          continue
+        }
+        vals.push(task.id)
+        await query(`UPDATE plan_tasks SET ${sets.join(', ')} WHERE id = $${i}`, vals)
+        applied.push(`updated task "${task.title}"`)
       }
     } else if (FIELD_TO_COLUMN[change.field] && 'newValue' in change) {
       const col = FIELD_TO_COLUMN[change.field]
@@ -239,10 +337,17 @@ async function dbApplyChanges(existing, changes) {
         change.newValue,
         existing.id,
       ])
+      applied.push(`set ${change.field} to "${change.newValue}"`)
+    } else {
+      skipped.push(`unknown change "${change.field}"`)
     }
   }
+
   await query('UPDATE plans SET updated_at = NOW() WHERE id = $1', [existing.id])
-  return dbGetPlan(existing.id)
+  console.log(
+    `[plans:update] applied=[${applied.join('; ')}]${skipped.length ? ` skipped=[${skipped.join('; ')}]` : ''}`,
+  )
+  return { plan: await dbGetPlan(existing.id), skipped }
 }
 
 /* --------------------------- in-memory helpers -------------------------- */
@@ -254,9 +359,9 @@ function memCreate(situation, plan, userId = null) {
 }
 
 function memApplyAndStore(existing, changes) {
-  const updated = applyChanges(existing, changes)
-  memPlans.set(existing.id, updated)
-  return updated
+  const { plan, skipped } = applyChanges(existing, changes)
+  memPlans.set(existing.id, plan)
+  return { plan, skipped }
 }
 
 function memUpdateFromDraft(planId, draft) {
@@ -278,24 +383,56 @@ function memUpdateFromDraft(planId, draft) {
   return updated
 }
 
-// Apply change operations to a plan object, returning a new plan (in-memory).
+// Apply change operations to a plan object (in-memory). Returns { plan, skipped }
+// mirroring the DB path, including safe id/title resolution for remove/update.
 export function applyChanges(plan, changes = []) {
   const next = { ...plan, tasks: [...(plan.tasks || [])] }
+  const skipped = []
   for (const change of changes) {
     switch (change.field) {
       case 'tasksRemove': {
-        const ids = new Set((change.value || []).map(String))
-        next.tasks = next.tasks.filter((t) => !ids.has(String(t.id)))
+        for (const ref of change.value || []) {
+          const { task, error } = resolveTaskRef(next.tasks, ref)
+          if (error) {
+            skipped.push(`remove skipped: ${error}`)
+            continue
+          }
+          next.tasks = next.tasks.filter((t) => String(t.id) !== String(task.id))
+        }
         break
       }
       case 'tasksAdd': {
-        const additions = (change.value || []).map((t, i) => ({
-          id: t.id ?? nextTaskId(next.tasks) + i,
-          completed: false,
-          priority: 'Medium',
-          ...t,
-        }))
+        const additions = (change.value || [])
+          .filter((t) => t?.title)
+          .map((t, i) => ({
+            id: t.id ?? nextTaskId(next.tasks) + i,
+            completed: false,
+            priority: 'Medium',
+            ...t,
+          }))
         next.tasks = [...next.tasks, ...additions]
+        break
+      }
+      case 'taskUpdate': {
+        for (const upd of change.value || []) {
+          const { task, error } = resolveTaskRef(next.tasks, upd.id ?? upd.title)
+          if (error) {
+            skipped.push(`update skipped: ${error}`)
+            continue
+          }
+          next.tasks = next.tasks.map((t) =>
+            String(t.id) === String(task.id)
+              ? {
+                  ...t,
+                  ...(upd.title ? { title: upd.title } : {}),
+                  ...(upd.description != null ? { description: upd.description } : {}),
+                  ...(upd.priority ? { priority: upd.priority } : {}),
+                  ...(upd.dueDate != null ? { dueDate: upd.dueDate } : {}),
+                  ...(upd.status ? { completed: upd.status === 'completed' } : {}),
+                }
+              : t,
+          )
+        }
         break
       }
       default:
@@ -303,7 +440,7 @@ export function applyChanges(plan, changes = []) {
     }
   }
   next.updatedAt = new Date().toISOString()
-  return next
+  return { plan: next, skipped }
 }
 
 function nextTaskId(tasks) {

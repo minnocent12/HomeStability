@@ -1,29 +1,74 @@
-import { NavLink, useNavigate } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { Link, NavLink, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Bookmark,
+  ChevronRight,
   ClipboardList,
   LayoutGrid,
   LogOut,
   MessageSquarePlus,
   Phone,
-  Settings,
   User,
 } from 'lucide-react'
 import { useSaved } from '../SavedContext.jsx'
 import { useAuth } from '../AuthContext.jsx'
+import { conversationsApi } from '../api/conversationsApi.js'
+
+// Relative date label: "Today, 10:24 AM" | "Yesterday" | "Jun 18".
+function relativeDate(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const now = new Date()
+  const yesterday = new Date(now)
+  yesterday.setDate(now.getDate() - 1)
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  if (d.toDateString() === now.toDateString()) return `Today, ${time}`
+  if (d.toDateString() === yesterday.toDateString()) return 'Yesterday'
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+}
 
 const NAV_ITEMS = [
-  { to: '/chat', label: 'New Conversation', icon: MessageSquarePlus },
+  { to: '/chat?new=true', label: 'New Conversation', icon: MessageSquarePlus },
   { to: '/resources', label: 'Resource Directory', icon: LayoutGrid },
   { to: '/plan', label: 'My Plan', icon: ClipboardList },
   { to: '/saved', label: 'Saved Resources', icon: Bookmark, showCount: true },
-  { to: '/settings', label: 'Settings', icon: Settings },
 ]
 
 export default function Sidebar({ onNavigate }) {
   const { savedCount } = useSaved()
   const { user, isAuthed, signOut } = useAuth()
   const navigate = useNavigate()
+  const location = useLocation()
+  const [searchParams] = useSearchParams()
+  const [conversations, setConversations] = useState([])
+
+  // Load the conversation list — on navigation, and whenever ChatPage signals a
+  // new conversation was created (so it appears immediately, no navigation needed).
+  useEffect(() => {
+    let active = true
+    const load = () =>
+      conversationsApi
+        .list()
+        .then((list) => {
+          if (active && Array.isArray(list)) setConversations(list)
+        })
+        .catch(() => {})
+    load()
+    window.addEventListener('hsg:conversations-changed', load)
+    return () => {
+      active = false
+      window.removeEventListener('hsg:conversations-changed', load)
+    }
+  }, [location.key])
+
+  const activeConv = searchParams.get('conv')
+  const isNewChat = searchParams.get('new') === 'true'
+  const onChat = location.pathname === '/chat'
+  // The clicked conversation (?conv=) is active; otherwise the most recent one
+  // is the active (latest-loaded) chat — but never while starting a new chat.
+  const isConvActive = (c, i) =>
+    onChat && !isNewChat && (activeConv ? c.id === activeConv : i === 0)
 
   const handleAuthAction = async () => {
     onNavigate?.()
@@ -48,41 +93,84 @@ export default function Sidebar({ onNavigate }) {
         </div>
       </div>
 
-      {/* Nav */}
-      <nav className="mt-7 flex flex-col gap-1">
-        {NAV_ITEMS.map(({ to, label, icon: Icon, showCount }) => (
-          <NavLink
-            key={to}
-            to={to}
-            onClick={onNavigate}
-            className={({ isActive }) =>
-              [
-                'group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors',
-                isActive
-                  ? 'bg-sage-light text-sage'
-                  : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900',
-              ].join(' ')
-            }
-          >
-            {({ isActive }) => (
-              <>
-                <Icon
-                  size={18}
-                  className={isActive ? 'text-sage' : 'text-gray-400 group-hover:text-gray-600'}
-                />
-                <span className="flex-1">{label}</span>
-                {showCount && savedCount > 0 && (
-                  <span className="rounded-full bg-sage px-2 py-0.5 text-[11px] font-semibold text-white">
-                    {savedCount}
-                  </span>
-                )}
-              </>
-            )}
-          </NavLink>
-        ))}
-      </nav>
+      {/* Nav + recent conversations (scrolls if the list is long) */}
+      <div className="mt-7 flex-1 min-h-0 overflow-y-auto">
+        <nav className="flex flex-col gap-1">
+          {NAV_ITEMS.map(({ to, label, icon: Icon, showCount }) => (
+            <NavLink
+              key={to}
+              to={to}
+              onClick={onNavigate}
+              className={({ isActive }) =>
+                [
+                  'group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors',
+                  isActive
+                    ? 'bg-sage-light text-sage'
+                    : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900',
+                ].join(' ')
+              }
+            >
+              {({ isActive }) => (
+                <>
+                  <Icon
+                    size={18}
+                    className={isActive ? 'text-sage' : 'text-gray-400 group-hover:text-gray-600'}
+                  />
+                  <span className="flex-1">{label}</span>
+                  {showCount && savedCount > 0 && (
+                    <span className="rounded-full bg-sage px-2 py-0.5 text-[11px] font-semibold text-white">
+                      {savedCount}
+                    </span>
+                  )}
+                </>
+              )}
+            </NavLink>
+          ))}
+        </nav>
 
-      <div className="flex-1" />
+        {/* Recent Conversations */}
+        {conversations.length > 0 && (
+          <div className="mt-6">
+            <div className="px-3 text-xs font-semibold uppercase tracking-wide text-gray-400">
+              Recent Conversations
+            </div>
+            <div className="mt-2 flex flex-col gap-0.5">
+              {conversations.slice(0, 5).map((c, i) => {
+                const active = isConvActive(c, i)
+                return (
+                  <Link
+                    key={c.id}
+                    to={`/chat?conv=${c.id}`}
+                    onClick={onNavigate}
+                    className={[
+                      'group flex items-center gap-2 rounded-xl px-3 py-2 transition-colors',
+                      active ? 'bg-sage-light' : 'hover:bg-gray-50',
+                    ].join(' ')}
+                  >
+                    <div className="min-w-0 flex-1 leading-tight">
+                      <div
+                        className={[
+                          'truncate text-sm font-semibold',
+                          active ? 'text-sage' : 'text-gray-800',
+                        ].join(' ')}
+                      >
+                        {c.title || 'Conversation'}
+                      </div>
+                      <div className="truncate text-xs text-gray-500">
+                        {relativeDate(c.updated_at || c.created_at)}
+                      </div>
+                    </div>
+                    <ChevronRight
+                      size={16}
+                      className={active ? 'text-sage' : 'text-gray-300 group-hover:text-gray-400'}
+                    />
+                  </Link>
+                )
+              })}
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* Crisis card */}
       <div className="rounded-2xl border border-rose-100 bg-rose-50/60 p-4">
