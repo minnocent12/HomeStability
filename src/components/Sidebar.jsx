@@ -181,8 +181,11 @@ export default function Sidebar({ onNavigate }) {
         <p className="mt-1.5 text-xs leading-relaxed text-rose-700/90">
           If you are in immediate danger or need emergency shelter, please call 911.
         </p>
-        <button className="mt-3 w-full rounded-lg bg-sage px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-sage-dark">
-          View Crisis Resources
+        <button
+          onClick={() => (window.location.href = 'tel:911')}
+          className="mt-3 w-full rounded-lg bg-rose-600 px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-rose-700"
+        >
+        Call 911
         </button>
       </div>
 
