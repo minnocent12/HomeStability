@@ -1,10 +1,12 @@
 import { useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { ChevronDown, Info, Loader2, Search, SlidersHorizontal } from 'lucide-react'
 import { FILTER_CATEGORIES } from '../data/resources.js' // presentation config only
 import { useResources } from '../ResourcesContext.jsx'
 import ResourceCard from './ResourceCard.jsx'
 
 export default function ResourceDirectory() {
+  const navigate = useNavigate()
   const { resources, loading } = useResources()
   const [query, setQuery] = useState('')
   const [activeCategory, setActiveCategory] = useState('All Categories')
@@ -34,7 +36,10 @@ export default function ResourceDirectory() {
             Explore trusted resources in Atlanta to support your housing stability.
           </p>
         </div>
-        <button className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3.5 py-2 text-sm font-semibold text-gray-700 transition-colors hover:bg-gray-50">
+        <button
+          onClick={() => navigate('/about')}
+          className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3.5 py-2 text-sm font-semibold text-gray-700 transition-colors hover:bg-gray-50"
+        >
           <Info size={16} className="text-sage" />
           About This Service
         </button>

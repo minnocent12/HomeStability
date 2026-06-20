@@ -1,11 +1,14 @@
 import { useState } from 'react'
-import { Outlet } from 'react-router-dom'
+import { Outlet, useLocation } from 'react-router-dom'
 import { Menu, X } from 'lucide-react'
 import Sidebar from './Sidebar.jsx'
 import RightPanel from './RightPanel.jsx'
 
 export default function Layout() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const location = useLocation()
+  // The full-width About page renders without the right panel.
+  const showRightPanel = location.pathname !== '/about'
 
   return (
     <div className="min-h-screen bg-[#fafaf8] text-gray-800">
@@ -57,10 +60,12 @@ export default function Layout() {
           <Outlet />
         </main>
 
-        {/* Right sidebar — fixed on desktop */}
-        <aside className="hidden xl:block sticky top-0 h-screen w-[300px] shrink-0 overflow-y-auto border-l border-gray-200 bg-[#fafaf8] px-5 py-8">
-          <RightPanel />
-        </aside>
+        {/* Right sidebar — fixed on desktop (hidden on the About page) */}
+        {showRightPanel && (
+          <aside className="hidden xl:block sticky top-0 h-screen w-[300px] shrink-0 overflow-y-auto border-l border-gray-200 bg-[#fafaf8] px-5 py-8">
+            <RightPanel />
+          </aside>
+        )}
       </div>
     </div>
   )

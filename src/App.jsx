@@ -10,6 +10,7 @@ import SavedPage from './components/SavedPage.jsx'
 import LoginPage from './components/LoginPage.jsx'
 import ChatPage from './components/ChatPage.jsx'
 import PlanPage from './components/PlanPage.jsx'
+import AboutPage from './components/AboutPage.jsx'
 
 export default function App() {
   return (
@@ -22,6 +23,7 @@ export default function App() {
             <Route index element={<Navigate to="/resources" replace />} />
             <Route path="/resources" element={<ResourceDirectory />} />
             <Route path="/resources/:id" element={<ResourceDetail />} />
+            <Route path="/about" element={<AboutPage />} />
             <Route path="/saved" element={<SavedPage />} />
             <Route path="/chat" element={<ChatPage />} />
             <Route path="/plan" element={<PlanPage />} />
