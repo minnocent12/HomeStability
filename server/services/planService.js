@@ -34,8 +34,15 @@ export const planService = {
   // Generate a plan DRAFT without persisting it (used by the "Create My Plan"
   // flow so the user can preview before confirming). Saving happens later via
   // createFromDraft / updateFromDraft on confirmation.
-  draftPlan: async (situation, messages = []) =>
-    groqService.generatePlan(situation || {}, messages || []),
+  draftPlan: async (situation, messages = [], recommendedIds = []) => {
+    const draft = await groqService.generatePlan(situation || {}, messages || [])
+    // Use the exact resources the chat already matched & showed the user, rather
+    // than whatever the plan-generation model picked — keeps them consistent.
+    if (Array.isArray(recommendedIds) && recommendedIds.length > 0) {
+      draft.recommendedResources = recommendedIds.map(Number)
+    }
+    return draft
+  },
 
   // Persist a user-confirmed plan draft (no AI generation — the draft is final).
   createFromDraft: async (draft, situation = {}, userId = null) => {
@@ -166,21 +173,24 @@ async function insertPlanChildren(planId, plan, situation) {
     )
   }
 
-  for (const resourceId of plan.recommendedResources || []) {
+  const passed = plan.recommendedResources || []
+  const inserted = []
+  for (const resourceId of passed) {
     // Score against the real resource so match_score reflects its category.
     const resource = await resourceService.getResourceById(resourceId)
-    const [scored] = matchingService.scoreResources(situation || {}, [
-      resource || { id: resourceId, category: null },
-    ])
-    const reason =
-      plan.whyResources?.[resourceId] ||
-      matchingService.getMatchReason(situation || {}, resource || { category: null })
-    await query(
+    if (!resource) continue // skip ids with no matching resource (avoid FK error)
+    const [scored] = matchingService.scoreResources(situation || {}, [resource])
+    const reason = matchingService.getMatchReason(situation || {}, resource)
+    const res = await query(
       `INSERT INTO plan_recommendations (plan_id, resource_id, match_score, reason)
-       VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+       VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING RETURNING resource_id`,
       [planId, Number(resourceId), scored?.score ?? null, reason],
     )
+    if (res.rows[0]) inserted.push(res.rows[0].resource_id)
   }
+  console.log(
+    `[plans] recommendations passed: [${passed.join(', ')}] | inserted: [${inserted.join(', ')}]`,
+  )
 }
 
 // Apply a confirmed draft to an existing plan. Ownership is enforced in the

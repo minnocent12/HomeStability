@@ -41,7 +41,11 @@ router.post('/generate', async (req, res) => {
 // body: { situation }
 router.post('/draft', async (req, res) => {
   try {
-    const draft = await planService.draftPlan(req.body?.situation || {}, req.body?.messages || [])
+    const draft = await planService.draftPlan(
+      req.body?.situation || {},
+      req.body?.messages || [],
+      req.body?.recommendedResourceIds || [],
+    )
     res.json(draft)
   } catch (err) {
     console.error('[plans:draft]', err.message)

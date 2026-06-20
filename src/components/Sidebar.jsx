@@ -88,8 +88,13 @@ export default function Sidebar({ onNavigate }) {
           <HouseMark />
         </div>
         <div className="leading-tight">
-          <div className="text-[15px] font-bold text-gray-900">Housing Stability Guide</div>
-          <div className="text-xs text-gray-500">Atlanta</div>
+          <div className="text-[32px] font-extrabold tracking-tight">
+             <span className="text-gray-900">Home</span>
+             <span className="text-sage">Path</span>
+          </div>
+          <div className="text-xs text-gray-500">
+             Atlanta Housing Guide
+          </div>
         </div>
       </div>
 
@@ -176,17 +181,33 @@ export default function Sidebar({ onNavigate }) {
       <div className="rounded-2xl border border-rose-100 bg-rose-50/60 p-4">
         <div className="flex items-center gap-2 text-sm font-semibold text-rose-800">
           <Phone size={15} className="text-rose-600" />
-          Need help right away?
+          Need urgent help?
         </div>
         <p className="mt-1.5 text-xs leading-relaxed text-rose-700/90">
-          If you are in immediate danger or need emergency shelter, please call 911.
+          If you need emergency shelter or housing help, call 211 or find local resources.
         </p>
-        <button
-          onClick={() => (window.location.href = 'tel:911')}
-          className="mt-3 w-full rounded-lg bg-rose-600 px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-rose-700"
+
+        <a
+          href="tel:211"
+          className="mt-3 block w-full rounded-lg bg-rose-600 px-3 py-2 text-center text-xs font-semibold text-white transition-colors hover:bg-rose-700"
         >
-        Call 911
-        </button>
+          Call 211
+        </a>
+        <p className="mt-1 text-[11px] leading-snug text-rose-700/80">
+          Free 24/7 referral line for shelter, food, and housing help
+        </p>
+
+        <Link
+          to="/resources?category=Shelter+%26+Housing"
+          onClick={onNavigate}
+          className="mt-2 block w-full rounded-lg border border-rose-200 bg-white px-3 py-2 text-center text-xs font-semibold text-rose-700 transition-colors hover:bg-rose-50"
+        >
+          Find Shelter Near You
+        </Link>
+
+        <p className="mt-2 text-center text-[11px] text-rose-700/70">
+          For immediate danger, call 911
+        </p>
       </div>
 
       {/* User card */}

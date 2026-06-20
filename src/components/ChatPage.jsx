@@ -15,6 +15,7 @@ import {
 import { chatApi } from '../api/chatApi.js'
 import { plansApi } from '../api/plansApi.js'
 import { conversationsApi } from '../api/conversationsApi.js'
+import { matchLabel } from '../utils/matchLabel.js'
 
 const GREETING = {
   role: 'assistant',
@@ -164,9 +165,14 @@ export default function ChatPage() {
     setPreparing(true)
     try {
       // Pass the conversation (minus the static greeting) so the draft reflects
-      // the actual chat, not just the slim {status,urgency} situation object.
+      // the actual chat, plus the exact resource IDs the chat already
+      // recommended — so the saved plan uses THOSE, not a fresh AI re-pick.
       const dialogue = messages.filter((m, i) => !(i === 0 && m === GREETING))
-      const draft = await plansApi.generateDraft(situation || {}, dialogue)
+      const draft = await plansApi.generateDraft(
+        situation || {},
+        dialogue,
+        recommended.map((r) => r.id),
+      )
       setPlanDraft(draft)
       setPreviewOpen(true)
     } finally {
@@ -245,21 +251,28 @@ export default function ChatPage() {
               <Sparkles size={14} /> Recommended for your situation
             </div>
             <div className="mt-3 space-y-2">
-              {recommended.map((r) => (
-                <Link
-                  key={r.id}
-                  to={`/resources/${r.id}`}
-                  className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm transition-colors hover:border-sage/40"
-                >
-                  <div className="min-w-0">
-                    <div className="truncate font-medium text-gray-900">{r.name}</div>
-                    <div className="truncate text-xs text-gray-500">{r.matchReason}</div>
-                  </div>
-                  <span className="ml-3 shrink-0 rounded-full bg-sage-light px-2 py-0.5 text-xs font-semibold text-sage">
-                    {r.matchScore}%
-                  </span>
-                </Link>
-              ))}
+              {recommended.map((r) => {
+                const match = matchLabel(r.matchScore)
+                return (
+                  <Link
+                    key={r.id}
+                    to={`/resources/${r.id}`}
+                    className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm transition-colors hover:border-sage/40"
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate font-medium text-gray-900">{r.name}</div>
+                      <div className="truncate text-xs text-gray-500">{r.matchReason}</div>
+                    </div>
+                    {match && (
+                      <span
+                        className={`ml-3 shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold ${match.className}`}
+                      >
+                        {match.label}
+                      </span>
+                    )}
+                  </Link>
+                )
+              })}
             </div>
           </div>
         )}
@@ -298,7 +311,7 @@ export default function ChatPage() {
         </button>
       </form>
       <p className="mt-2 text-center text-xs text-gray-400">
-        We do not store sensitive personal information.
+        HomePath provides housing guidance and resource recommendations, not legal advice.
       </p>
 
       {previewOpen && planDraft && (
@@ -414,19 +427,24 @@ function PlanPreview({ draft, recommended, isUpdate, saving, onConfirm, onClose 
             <div>
               <h3 className="text-sm font-bold text-gray-900">Recommended resources</h3>
               <ul className="mt-2 space-y-1.5">
-                {recommended.map((r) => (
-                  <li
-                    key={r.id}
-                    className="flex items-center justify-between rounded-lg border border-gray-200 px-3 py-2 text-sm"
-                  >
-                    <span className="truncate text-gray-800">{r.name}</span>
-                    {typeof r.matchScore === 'number' && (
-                      <span className="ml-3 shrink-0 rounded-full bg-sage-light px-2 py-0.5 text-xs font-semibold text-sage">
-                        {r.matchScore}%
-                      </span>
-                    )}
-                  </li>
-                ))}
+                {recommended.map((r) => {
+                  const match = matchLabel(r.matchScore)
+                  return (
+                    <li
+                      key={r.id}
+                      className="flex items-center justify-between rounded-lg border border-gray-200 px-3 py-2 text-sm"
+                    >
+                      <span className="truncate text-gray-800">{r.name}</span>
+                      {match && (
+                        <span
+                          className={`ml-3 shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold ${match.className}`}
+                        >
+                          {match.label}
+                        </span>
+                      )}
+                    </li>
+                  )
+                })}
               </ul>
             </div>
           )}

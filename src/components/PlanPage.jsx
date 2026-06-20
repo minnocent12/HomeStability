@@ -9,7 +9,6 @@ import {
   MessageSquarePlus,
   RefreshCw,
   Send,
-  Sparkles,
   Target,
 } from 'lucide-react'
 import { plansApi } from '../api/plansApi.js'
@@ -35,7 +34,6 @@ export default function PlanPage() {
   const { getById } = useResources()
   const [plan, setPlan] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [creating, setCreating] = useState(false)
   const [completed, setCompleted] = useState(() => new Set())
   const [updateMsg, setUpdateMsg] = useState('')
   const [updating, setUpdating] = useState(false)
@@ -104,19 +102,6 @@ export default function PlanPage() {
       setPlan(p || null)
     } finally {
       setLoading(false)
-    }
-  }
-
-  const createPlanExplicitly = async () => {
-    setCreating(true)
-    try {
-      // Explicit user action only — generate with whatever minimal situation we
-      // have, persist via the API, then render the saved DB response.
-      const p = await plansApi.generate({ status: 'eviction_risk', income: 'low' })
-      if (p?.id) localStorage.setItem('hsg_plan_id', p.id)
-      setPlan(p)
-    } finally {
-      setCreating(false)
     }
   }
 
@@ -198,20 +183,12 @@ export default function PlanPage() {
             situation. Once we understand your needs, we&apos;ll create a personalized housing
             stability plan.
           </p>
-          <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+          <div className="mt-6 flex items-center justify-center">
             <button
               onClick={() => navigate('/chat')}
               className="inline-flex items-center gap-2 rounded-lg bg-sage px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-sage-dark"
             >
               <MessageSquarePlus size={16} /> Go to Chat
-            </button>
-            <button
-              onClick={createPlanExplicitly}
-              disabled={creating}
-              className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 transition-colors hover:bg-gray-50 disabled:opacity-60"
-            >
-              {creating ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
-              Create Plan
             </button>
           </div>
         </div>
@@ -346,9 +323,7 @@ export default function PlanPage() {
               >
                 <div className="min-w-0">
                   <div className="truncate text-sm font-medium text-gray-900">{r.name}</div>
-                  <div className="truncate text-xs text-gray-500">
-                    {plan.whyResources?.[r.id] || r.provider}
-                  </div>
+                  <div className="truncate text-xs text-gray-500">{r.description}</div>
                 </div>
                 <ArrowRight size={16} className="ml-3 shrink-0 text-gray-400" />
               </Link>

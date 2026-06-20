@@ -24,8 +24,11 @@ export const plansApi = {
   // Generate a plan draft for preview (not saved). Used by "Create My Plan".
   // `messages` is the conversation history, so the draft reflects the actual
   // chat rather than only the slim {status,urgency} situation object.
-  generateDraft: (situation = {}, messages = []) =>
-    apiCall('/plans/draft', { method: 'POST', body: JSON.stringify({ situation, messages }) }),
+  generateDraft: (situation = {}, messages = [], recommendedResourceIds = []) =>
+    apiCall('/plans/draft', {
+      method: 'POST',
+      body: JSON.stringify({ situation, messages, recommendedResourceIds }),
+    }),
 
   // Save a user-confirmed plan draft. Pass planId to update an existing plan.
   confirmDraft: ({ planDraft, situation = {}, planId = null }) =>

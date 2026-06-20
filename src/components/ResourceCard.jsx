@@ -9,6 +9,7 @@ import {
 } from 'lucide-react'
 import { CATEGORIES } from '../data/resources.js'
 import { useSaved } from '../SavedContext.jsx'
+import { matchLabel } from '../utils/matchLabel.js'
 
 const ICONS = { HandCoins, Scale, Home, Zap }
 
@@ -17,6 +18,7 @@ export default function ResourceCard({ resource }) {
   const cat = CATEGORIES[resource.category]
   const Icon = ICONS[cat?.icon] ?? Home
   const saved = isSaved(resource.id)
+  const match = matchLabel(resource.matchScore)
 
   return (
     <div className="flex flex-col rounded-2xl border border-gray-200 bg-white p-5 shadow-card transition-shadow hover:shadow-md">
@@ -40,9 +42,11 @@ export default function ResourceCard({ resource }) {
         >
           {resource.category}
         </span>
-        {typeof resource.matchScore === 'number' && (
-          <span className="inline-flex w-fit items-center rounded-full bg-sage-light px-2.5 py-0.5 text-xs font-semibold text-sage">
-            {resource.matchScore}% Match
+        {match && (
+          <span
+            className={`inline-flex w-fit items-center rounded-full px-2.5 py-0.5 text-xs font-semibold ${match.className}`}
+          >
+            {match.label}
           </span>
         )}
       </div>
