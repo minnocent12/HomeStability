@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ChevronDown, Info, Loader2, Search, SlidersHorizontal } from 'lucide-react'
 import { FILTER_CATEGORIES } from '../data/resources.js' // presentation config only
@@ -10,12 +10,40 @@ export default function ResourceDirectory() {
   const { resources, loading } = useResources()
   const [query, setQuery] = useState('')
   const [activeCategory, setActiveCategory] = useState('All Categories')
+  const [sortBy, setSortBy] = useState('relevant')
+  const [moreOpen, setMoreOpen] = useState(false)
+  const [selectedCats, setSelectedCats] = useState([]) // multi-select categories
+  const moreRef = useRef(null)
+
+  // All categories present (FILTER_CATEGORIES order, plus any extras from data).
+  const moreFilterCategories = useMemo(() => {
+    const base = FILTER_CATEGORIES.filter((c) => c !== 'All Categories')
+    const extra = [...new Set(resources.map((r) => r.category).filter(Boolean))].filter(
+      (c) => !base.includes(c),
+    )
+    return [...base, ...extra]
+  }, [resources])
+
+  const toggleCat = (c) =>
+    setSelectedCats((prev) => (prev.includes(c) ? prev.filter((x) => x !== c) : [...prev, c]))
+
+  // Close the More Filters panel when clicking outside of it.
+  useEffect(() => {
+    if (!moreOpen) return
+    const onDown = (e) => {
+      if (moreRef.current && !moreRef.current.contains(e.target)) setMoreOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [moreOpen])
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
-    return resources.filter((r) => {
+    const list = resources.filter((r) => {
+      // Single-category button AND multi-select (match ANY selected) both apply.
       const matchesCategory =
-        activeCategory === 'All Categories' || r.category === activeCategory
+        (activeCategory === 'All Categories' || r.category === activeCategory) &&
+        (selectedCats.length === 0 || selectedCats.includes(r.category))
       const matchesQuery =
         !q ||
         [r.name, r.category, r.provider, r.description]
@@ -24,7 +52,17 @@ export default function ResourceDirectory() {
           .includes(q)
       return matchesCategory && matchesQuery
     })
-  }, [resources, query, activeCategory])
+
+    // Sort applies to the already-filtered results. "Most Relevant" keeps the
+    // original API order.
+    if (sortBy === 'az') {
+      return list.sort((a, b) => (a.name || '').localeCompare(b.name || ''))
+    }
+    if (sortBy === 'provider') {
+      return list.sort((a, b) => (a.provider || '').localeCompare(b.provider || ''))
+    }
+    return list
+  }, [resources, query, activeCategory, sortBy, selectedCats])
 
   return (
     <div className="mx-auto max-w-5xl">
@@ -63,7 +101,8 @@ export default function ResourceDirectory() {
         <div className="relative">
           <select
             className="h-full appearance-none rounded-xl border border-gray-300 bg-white py-2.5 pl-4 pr-10 text-sm font-medium text-gray-700 focus:border-sage focus:outline-none focus:ring-2 focus:ring-sage/20"
-            defaultValue="relevant"
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value)}
           >
             <option value="relevant">Most Relevant</option>
             <option value="az">A – Z</option>
@@ -95,10 +134,52 @@ export default function ResourceDirectory() {
             </button>
           )
         })}
-        <button className="inline-flex items-center gap-1.5 rounded-full border border-gray-300 bg-white px-3.5 py-1.5 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-50">
-          <SlidersHorizontal size={14} />
-          More Filters
-        </button>
+        <div className="relative" ref={moreRef}>
+          <button
+            onClick={() => setMoreOpen((o) => !o)}
+            className={[
+              'inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-sm font-medium transition-colors',
+              selectedCats.length > 0
+                ? 'border-sage bg-sage-light text-sage'
+                : 'border-gray-300 bg-white text-gray-600 hover:bg-gray-50',
+            ].join(' ')}
+          >
+            <SlidersHorizontal size={14} />
+            More Filters{selectedCats.length > 0 ? ` (${selectedCats.length})` : ''}
+          </button>
+
+          {moreOpen && (
+            <div className="absolute right-0 z-20 mt-2 w-60 rounded-xl border border-gray-200 bg-white p-3 shadow-lg">
+              <div className="flex items-center justify-between px-1 pb-2">
+                <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                  Filter by category
+                </span>
+                <button
+                  onClick={() => setSelectedCats([])}
+                  className="text-xs font-semibold text-sage hover:underline"
+                >
+                  Clear
+                </button>
+              </div>
+              <div className="flex flex-col gap-0.5">
+                {moreFilterCategories.map((c) => (
+                  <label
+                    key={c}
+                    className="flex cursor-pointer items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedCats.includes(c)}
+                      onChange={() => toggleCat(c)}
+                      className="h-4 w-4 rounded border-gray-300 accent-sage"
+                    />
+                    {c}
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Count */}
